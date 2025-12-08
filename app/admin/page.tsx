@@ -3,13 +3,29 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
-import { getAllProfiles, getAllTickets, createTicket, deleteTicket, getTicketStats, uploadProfilePicture, Profile, Ticket } from '../lib/supabase';
+import { getAllProfiles, getAllTickets, createTicket, deleteTicket, uploadProfilePicture, uploadTicketAttachment, updateTicket, Profile, Ticket } from '../lib/supabase';
 import Link from 'next/link';
 import Image from 'next/image';
+
+// Hook to force re-render every minute for time tracking
+function useTimeUpdate() {
+  const [, setTick] = useState(0);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTick(t => t + 1);
+    }, 60000); // Update every minute
+    
+    return () => clearInterval(interval);
+  }, []);
+}
 
 export default function AdminPage() {
   const router = useRouter();
   const { user, profile, loading, isAdmin, signOut } = useAuth();
+  
+  // Force re-render every minute to update time tracker
+  useTimeUpdate();
   
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -25,9 +41,19 @@ export default function AdminPage() {
     location: 'remote' as 'on-site' | 'remote',
     client: '',
     clickupTicket: '',
-    ticketType: '' as 'Hardware' | 'Software' | '',
+    ticketType: '' as 'Hardware' | 'Software' | 'New Site' | '',
     estateOrBuilding: '',
-    cmlLocation: ''
+    cmlLocation: '',
+    // New Site fields
+    siteName: '',
+    installers: [] as string[],
+    installerInput: '',
+    dependencies: [] as string[],
+    dependencyInput: '',
+    targetDate: '',
+    // File uploads
+    attachments: [] as File[],
+    siteFiles: [] as { file: File; label: string }[]
   });
 
   // Stats export state
@@ -38,20 +64,31 @@ export default function AdminPage() {
   // Profile picture upload state
   const [uploadingFor, setUploadingFor] = useState<Profile | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
 
-  // Redirect if not admin
+  // User management state
+  const [showUserManagement, setShowUserManagement] = useState(false);
+
+  // Redirect if not admin - with better loading state
   useEffect(() => {
-    if (!loading && (!user || !isAdmin)) {
-      router.push('/dashboard');
+    if (!loading) {
+      if (!user) {
+        router.push('/login');
+        return;
+      }
+      if (!isAdmin) {
+        router.push('/dashboard');
+        return;
+      }
     }
   }, [user, loading, isAdmin, router]);
 
-  // Load data
+  // Load data - only if authenticated and admin
   useEffect(() => {
-    if (user && isAdmin) {
+    if (!loading && user && isAdmin) {
       loadData();
     }
-  }, [user, isAdmin]);
+  }, [user, isAdmin, loading]);
 
   // Set default date range
   useEffect(() => {
@@ -66,6 +103,10 @@ export default function AdminPage() {
     console.log('loadData: Starting...');
     setLoadingData(true);
     try {
+      console.log('loadData: Current user:', user?.id);
+      console.log('loadData: Current profile:', profile);
+      console.log('loadData: Is admin?', isAdmin);
+      
       console.log('loadData: Fetching profiles...');
       const profilesData = await getAllProfiles();
       console.log('loadData: Profiles result:', profilesData);
@@ -77,7 +118,7 @@ export default function AdminPage() {
       setProfiles(profilesData);
       setTickets(ticketsData);
     } catch (err) {
-      console.error('loadData: Error:', err);
+      console.error('loadData: Exception:', err);
     }
     setLoadingData(false);
     console.log('loadData: Done');
@@ -85,25 +126,114 @@ export default function AdminPage() {
 
   const handleCreateTicket = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUserId || !newTicketData.issue.trim() || !newTicketData.client.trim() || !newTicketData.ticketType || !newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim()) return;
+    
+    if (!selectedUserId || !newTicketData.issue.trim() || !newTicketData.client.trim() || !newTicketData.ticketType) return;
+    
+    // Validation for regular tickets
+    if (newTicketData.ticketType !== 'New Site') {
+      if (!newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim()) return;
+    }
+    
+    // Validation for New Site tickets
+    if (newTicketData.ticketType === 'New Site') {
+      if (!newTicketData.siteName.trim()) return;
+    }
 
-    const { data, error } = await createTicket({
-      user_id: selectedUserId,
-      client: newTicketData.client.trim(),
-      clickup_ticket: newTicketData.clickupTicket.trim() || undefined,
-      location: newTicketData.location,
-      issue: newTicketData.issue.trim(),
-      created_by: user?.id,
-      ticket_type: newTicketData.ticketType,
-      estate_or_building: newTicketData.estateOrBuilding.trim(),
-      cml_location: newTicketData.cmlLocation.trim()
-    });
+    setUploadingFiles(true);
 
-    if (!error && data) {
+    try {
+      // Create ticket first (without files)
+      const ticketPayload: any = {
+        user_id: selectedUserId,
+        client: newTicketData.client.trim(),
+        clickup_ticket: newTicketData.clickupTicket.trim() || undefined,
+        location: newTicketData.location,
+        issue: newTicketData.issue.trim(),
+        created_by: user?.id,
+        ticket_type: newTicketData.ticketType,
+      };
+
+      // Add regular ticket fields
+      if (newTicketData.ticketType !== 'New Site') {
+        ticketPayload.estate_or_building = newTicketData.estateOrBuilding.trim();
+        ticketPayload.cml_location = newTicketData.cmlLocation.trim();
+      }
+
+      // Add New Site fields
+      if (newTicketData.ticketType === 'New Site') {
+        ticketPayload.site_name = newTicketData.siteName.trim();
+        ticketPayload.installers = newTicketData.installers;
+        ticketPayload.dependencies = newTicketData.dependencies;
+        ticketPayload.target_date = newTicketData.targetDate || undefined;
+      }
+
+      const { data, error } = await createTicket(ticketPayload);
+      
+      if (error || !data) {
+        alert('Error creating ticket: ' + (error as Error).message);
+        return;
+      }
+      
+      // Upload attachments for regular tickets (max 5)
+      if (newTicketData.ticketType !== 'New Site' && newTicketData.attachments.length > 0) {
+        const uploadPromises = newTicketData.attachments.slice(0, 5).map(async (file) => {
+          const { url, error } = await uploadTicketAttachment(data.id, file, 'attachment');
+          if (error || !url) {
+            console.error('Error uploading attachment:', error);
+            return null;
+          }
+          return { url, name: file.name, type: file.type };
+        });
+        const results = await Promise.all(uploadPromises);
+        const attachments = results.filter((r): r is { url: string; name: string; type: string } => r !== null);
+        
+        // Update ticket with attachments
+        if (attachments.length > 0) {
+          await updateTicket(data.id, { attachments });
+        }
+      }
+
+      // Upload site files for New Site tickets
+      if (newTicketData.ticketType === 'New Site' && newTicketData.siteFiles.length > 0) {
+        const siteFilePromises = newTicketData.siteFiles.map(async ({ file, label }) => {
+          const { url, error } = await uploadTicketAttachment(data.id, file, 'site_file', label);
+          if (error || !url) {
+            console.error('Error uploading site file:', error);
+            return null;
+          }
+          return { url, name: file.name, type: file.type, label };
+        });
+        const siteFileResults = await Promise.all(siteFilePromises);
+        const siteFiles = siteFileResults.filter((r): r is { url: string; name: string; type: string; label?: string } => r !== null);
+        
+        // Update ticket with site files
+        if (siteFiles.length > 0) {
+          await updateTicket(data.id, { site_files: siteFiles });
+        }
+      }
+      
       await loadData();
-      setNewTicketData({ issue: '', location: 'remote', client: '', clickupTicket: '', ticketType: '', estateOrBuilding: '', cmlLocation: '' });
+      setNewTicketData({ 
+        issue: '', 
+        location: 'remote', 
+        client: '', 
+        clickupTicket: '', 
+        ticketType: '', 
+        estateOrBuilding: '', 
+        cmlLocation: '',
+        siteName: '',
+        installers: [],
+        installerInput: '',
+        dependencies: [],
+        dependencyInput: '',
+        targetDate: '',
+        attachments: [],
+        siteFiles: []
+      });
       setSelectedUserId('');
       setShowCreateForm(false);
+    } finally {
+      setUploadingFiles(false);
     }
   };
 
@@ -131,7 +261,7 @@ export default function AdminPage() {
     }
 
     setUploading(true);
-    const { url, error } = await uploadProfilePicture(uploadingFor.id, file);
+    const { publicUrl, error } = await uploadProfilePicture(uploadingFor.id, file);
     setUploading(false);
 
     if (error) {
@@ -181,22 +311,24 @@ export default function AdminPage() {
     
     const headers = [
       'Ticket Number',
-      'Member',
-      'Client',
-      'Type',
-      'Estate/Building',
-      'Location (CML)',
-      'Task Location',
-      'ClickUp Ticket',
-      'Status',
-      'Issue',
-      'Resolution',
-      'Has Dependencies',
-      'Dependency Name',
-      'Updates',
-      'Response Time (min)',
-      'Created At',
-      'Closed At'
+      'Team Member',
+      'Client Name',
+      'Type (Hardware/Software)',
+      'Estate or Building',
+      'Location (as per CML)',
+      'Work Type (On-Site/Remote)',
+      'ClickUp Ticket Reference',
+      'Ticket Status',
+      'Issue Description',
+      'Resolution Description',
+      'Has Dependencies (Yes/No)',
+      'Dependency Company/Department',
+      'Ticket Updates',
+      'Total Time Tracked (Minutes)',
+      'Time Log Details',
+      'Response Time (Minutes)',
+      'Date Created',
+      'Date Closed'
     ];
     
     const rows = exportTickets.map(t => {
@@ -209,21 +341,30 @@ export default function AdminPage() {
           ).join(' | ')
         : '';
       
+      // Format time logs as a single string
+      const timeLogsFormatted = t.time_logs && t.time_logs.length > 0
+        ? t.time_logs.map((log: { minutes: number; description: string; timestamp: string; logged_by?: string }) => 
+            `[${new Date(log.timestamp).toLocaleString('en-ZA')}] ${log.minutes}min - ${log.description}${log.logged_by ? ` (${log.logged_by})` : ''}`
+          ).join(' | ')
+        : '';
+      
       return [
-        t.ticket_number,
+        t.ticket_number || '',
         memberProfile?.full_name || 'Unknown',
         t.client || '',
         t.ticket_type || '',
         t.estate_or_building || '',
         t.cml_location || '',
-        t.location || '',
+        t.location === 'on-site' ? 'On-Site' : t.location === 'remote' ? 'Remote' : '',
         t.clickup_ticket || '',
-        t.status,
+        t.status === 'open' ? 'Open' : t.status === 'closed' ? 'Closed' : '',
         `"${(t.issue || '').replace(/"/g, '""')}"`,
         `"${(t.resolution || '').replace(/"/g, '""')}"`,
         t.has_dependencies ? 'Yes' : 'No',
         t.dependency_name || '',
         `"${updatesFormatted.replace(/"/g, '""')}"`,
+        t.total_time_minutes || '',
+        `"${timeLogsFormatted.replace(/"/g, '""')}"`,
         t.response_time_minutes || '',
         new Date(t.created_at).toLocaleString('en-ZA'),
         t.closed_at ? new Date(t.closed_at).toLocaleString('en-ZA') : ''
@@ -260,37 +401,47 @@ export default function AdminPage() {
     return colors[name.charCodeAt(0) % colors.length];
   };
 
-  // Debug info - expanded
-  console.log('Admin Page Debug:', JSON.stringify({ loading, loadingData, hasUser: !!user, hasProfile: !!profile, isAdmin }, null, 2));
-
-  // Show debug panel instead of blocking
-  const debugInfo = (
-    <div className="fixed bottom-4 right-4 p-4 bg-slate-800 border border-slate-600 rounded-xl text-xs font-mono z-50">
-      <p className="text-slate-400">Debug Info:</p>
-      <p className={loading ? 'text-amber-400' : 'text-emerald-400'}>loading: {String(loading)}</p>
-      <p className={!user ? 'text-amber-400' : 'text-emerald-400'}>user: {user ? 'yes' : 'no'}</p>
-      <p className={!profile ? 'text-amber-400' : 'text-emerald-400'}>profile: {profile ? 'yes' : 'no'}</p>
-      <p className={!isAdmin ? 'text-amber-400' : 'text-emerald-400'}>isAdmin: {String(isAdmin)}</p>
-      <p className={loadingData ? 'text-amber-400' : 'text-emerald-400'}>loadingData: {String(loadingData)}</p>
-    </div>
-  );
-
-  if (loading && !user) {
+  // Show loading or unauthorized state
+  if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center flex-col gap-4">
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-slate-400">Checking authentication...</p>
-        {debugInfo}
       </div>
     );
   }
 
-  if (!user) {
+  // Show unauthorized state if not admin
+  if (!user || !isAdmin) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 mx-auto rounded-2xl bg-rose-500/20 flex items-center justify-center mb-4">
+            <svg className="w-8 h-8 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-bold text-white mb-2">Access Denied</h1>
+          <p className="text-slate-400 mb-4">You don't have permission to access this page.</p>
+          <Link href="/dashboard" className="text-cyan-400 hover:text-cyan-300">
+            Go to Dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  // Show unauthorized state if not admin
+  if (!isAdmin) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center flex-col gap-4">
-        <p className="text-slate-400">No user found.</p>
-        <Link href="/login" className="text-cyan-400">Go to Login</Link>
-        {debugInfo}
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-rose-500/20 flex items-center justify-center mb-4">
+          <svg className="w-8 h-8 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <h1 className="text-xl font-bold text-white mb-2">Access Denied</h1>
+        <p className="text-slate-400 mb-4">You don't have administrator privileges to access this page.</p>
+        <Link href="/dashboard" className="text-cyan-400 hover:text-cyan-300">Go to Dashboard</Link>
       </div>
     );
   }
@@ -300,7 +451,6 @@ export default function AdminPage() {
       <div className="min-h-screen bg-slate-950 flex items-center justify-center flex-col gap-4">
         <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
         <p className="text-slate-400">Loading tickets and team data...</p>
-        {debugInfo}
       </div>
     );
   }
@@ -319,32 +469,40 @@ export default function AdminPage() {
               </Link>
               
               <div className="relative group">
-                {profile.avatar_url ? (
+                {profile?.avatar_url ? (
                   <Image src={profile.avatar_url} alt={profile.full_name} width={48} height={48} className="w-12 h-12 rounded-xl object-cover shadow-lg" />
                 ) : (
                   <div className={`w-12 h-12 rounded-xl bg-gradient-to-br from-rose-500 to-orange-600 flex items-center justify-center text-white font-bold shadow-lg`}>
-                    {profile.avatar}
+                    {profile?.avatar || 'A'}
                   </div>
                 )}
-                <button 
-                  onClick={() => setUploadingFor(profile)}
-                  className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-cyan-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-400"
-                  title="Upload profile picture"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                </button>
+                {profile && (
+                  <button 
+                    onClick={() => setUploadingFor(profile)}
+                    className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-cyan-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-400"
+                    title="Upload profile picture"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </button>
+                )}
               </div>
               
               <div>
-                <h1 className="text-xl font-bold text-white">{profile.full_name}</h1>
-                <p className="text-sm text-slate-400">{profile.role} • Admin</p>
+                <h1 className="text-xl font-bold text-white">{profile?.full_name || 'Admin'}</h1>
+                <p className="text-sm text-slate-400">{profile?.role || 'Administrator'} • Admin</p>
               </div>
             </div>
             
             <div className="flex items-center gap-3">
+              <button onClick={() => setShowUserManagement(true)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-violet-500/20 border border-violet-500/30 text-violet-400 hover:bg-violet-500/30 transition-all">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+                Manage Users
+              </button>
               <button onClick={() => setShowStatsExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/30 transition-all">
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -494,6 +652,100 @@ export default function AdminPage() {
                         </div>
                         
                         <p className="text-sm text-slate-300 mb-2">{ticket.issue}</p>
+
+                        {/* Show ticket details */}
+                        <div className="flex flex-wrap gap-2 mb-2 text-xs">
+                          {ticket.ticket_type && (
+                            <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300">{ticket.ticket_type}</span>
+                          )}
+                          {ticket.estate_or_building && (
+                            <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300">{ticket.estate_or_building}</span>
+                          )}
+                          {ticket.cml_location && (
+                            <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300">📍 {ticket.cml_location}</span>
+                          )}
+                          {ticket.has_dependencies && (
+                            <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400">⚠️ {ticket.dependency_name}</span>
+                          )}
+                        </div>
+
+                        {/* Show Updates */}
+                        {ticket.updates && ticket.updates.length > 0 && (
+                          <div className="mt-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                            <p className="text-xs text-blue-400 mb-2">Updates ({ticket.updates.length}):</p>
+                            <div className="space-y-2 max-h-32 overflow-y-auto">
+                              {ticket.updates.map((update: { text: string; timestamp: string }, idx: number) => (
+                                <div key={idx} className="text-xs">
+                                  <span className="text-blue-300">[{new Date(update.timestamp).toLocaleDateString('en-ZA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}]</span>
+                                  <span className="text-slate-300 ml-1">{update.text}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Show Auto Time Tracked */}
+                        {(ticket.total_time_minutes || (ticket.time_logs && ticket.time_logs.length > 0)) && (
+                          <div className="mt-2 p-2 rounded-lg bg-violet-500/10 border border-violet-500/20">
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-xs text-violet-400">⏱️ Auto Time Tracked</p>
+                              <span className="text-xs font-bold text-violet-300">
+                                {(() => {
+                                  // Calculate total time including current elapsed time
+                                  const loggedTime = ticket.total_time_minutes || 0;
+                                  const lastUpdateTime = ticket.updates && ticket.updates.length > 0 
+                                    ? new Date(ticket.updates[ticket.updates.length - 1].timestamp).getTime()
+                                    : new Date(ticket.created_at).getTime();
+                                  const currentElapsed = ticket.status === 'open' 
+                                    ? Math.round((new Date().getTime() - lastUpdateTime) / (1000 * 60))
+                                    : 0;
+                                  const totalMinutes = loggedTime + currentElapsed;
+                                  return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+                                })()}
+                              </span>
+                            </div>
+                            {ticket.time_logs && ticket.time_logs.length > 0 && (
+                              <div className="space-y-1 max-h-20 overflow-y-auto">
+                                {ticket.time_logs.map((log: { minutes: number; description: string; timestamp: string; logged_by?: string }, idx: number) => {
+                                  // For the initial "Ticket opened" log with 0 minutes, show actual elapsed time
+                                  const isInitialLog = log.description === 'Ticket opened' && log.minutes === 0 && idx === 0;
+                                  const displayMinutes = isInitialLog && ticket.status === 'open'
+                                    ? Math.round((new Date().getTime() - new Date(ticket.created_at).getTime()) / (1000 * 60))
+                                    : log.minutes;
+                                  
+                                  return (
+                                    <div key={idx} className="text-xs">
+                                      <span className="text-violet-300 font-medium">
+                                        {displayMinutes > 0 ? `${displayMinutes}m` : '0m'}
+                                        {isInitialLog && ticket.status === 'open' && (
+                                          <span className="text-violet-400/70 ml-1 text-xs">(live)</span>
+                                        )}
+                                      </span>
+                                      <span className="text-slate-400 mx-1">-</span>
+                                      <span className="text-slate-300">{log.description}</span>
+                                      {log.logged_by && log.logged_by !== 'System' && <span className="text-slate-500 ml-1">(by {log.logged_by})</span>}
+                                      <span className="text-slate-500 ml-1 text-xs">
+                                        - {new Date(log.timestamp).toLocaleDateString('en-ZA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                                {/* Show additional current elapsed time if there are updates */}
+                                {ticket.status === 'open' && ticket.updates && ticket.updates.length > 0 && (() => {
+                                  const lastUpdateTime = new Date(ticket.updates[ticket.updates.length - 1].timestamp).getTime();
+                                  const currentElapsed = Math.round((new Date().getTime() - lastUpdateTime) / (1000 * 60));
+                                  return currentElapsed > 0 ? (
+                                    <div className="text-xs pt-1 border-t border-violet-500/20 mt-1">
+                                      <span className="text-violet-300 font-medium">{currentElapsed}m</span>
+                                      <span className="text-slate-400 mx-1">-</span>
+                                      <span className="text-slate-300 italic">Currently tracking since last update</span>
+                                    </div>
+                                  ) : null;
+                                })()}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         
                         {ticket.status === 'closed' && ticket.resolution && (
                           <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 mt-2">
@@ -572,40 +824,195 @@ export default function AdminPage() {
                   <label className="block text-sm font-medium text-slate-300 mb-2">Type <span className="text-rose-400">*</span></label>
                   <select
                     value={newTicketData.ticketType}
-                    onChange={(e) => setNewTicketData({ ...newTicketData, ticketType: e.target.value as 'Hardware' | 'Software' | '' })}
+                    onChange={(e) => setNewTicketData({ ...newTicketData, ticketType: e.target.value as 'Hardware' | 'Software' | 'New Site' | '' })}
                     required
                     className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white appearance-none cursor-pointer"
                   >
                     <option value="">Select type...</option>
                     <option value="Hardware">Hardware</option>
                     <option value="Software">Software</option>
+                    <option value="New Site">New Site</option>
                   </select>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">Estate or Building <span className="text-rose-400">*</span></label>
-                  <input
-                    type="text"
-                    value={newTicketData.estateOrBuilding}
-                    onChange={(e) => setNewTicketData({ ...newTicketData, estateOrBuilding: e.target.value })}
-                    required
-                    className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
-                    placeholder="Enter estate or building name..."
-                  />
-                </div>
+                {/* Regular ticket fields (Hardware/Software) */}
+                {newTicketData.ticketType !== 'New Site' && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Estate or Building <span className="text-rose-400">*</span></label>
+                      <input
+                        type="text"
+                        value={newTicketData.estateOrBuilding}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, estateOrBuilding: e.target.value })}
+                        required={newTicketData.ticketType !== 'New Site'}
+                        className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                        placeholder="Enter estate or building name..."
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Location <span className="text-rose-400">*</span></label>
-                  <p className="text-xs text-slate-500 mb-2">as per CML</p>
-                  <input
-                    type="text"
-                    value={newTicketData.cmlLocation}
-                    onChange={(e) => setNewTicketData({ ...newTicketData, cmlLocation: e.target.value })}
-                    required
-                    className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
-                    placeholder="Enter location..."
-                  />
-                </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-1">Location <span className="text-rose-400">*</span></label>
+                      <p className="text-xs text-slate-500 mb-2">as per CML</p>
+                      <input
+                        type="text"
+                        value={newTicketData.cmlLocation}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, cmlLocation: e.target.value })}
+                        required={newTicketData.ticketType !== 'New Site'}
+                        className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                        placeholder="Enter location..."
+                      />
+                    </div>
+                  </>
+                )}
+
+                {/* New Site specific fields */}
+                {newTicketData.ticketType === 'New Site' && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Site Name <span className="text-rose-400">*</span></label>
+                      <input
+                        type="text"
+                        value={newTicketData.siteName}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, siteName: e.target.value })}
+                        required
+                        className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                        placeholder="Enter site name..."
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Installers</label>
+                      <div className="flex gap-2 mb-2">
+                        <input
+                          type="text"
+                          value={newTicketData.installerInput}
+                          onChange={(e) => setNewTicketData({ ...newTicketData, installerInput: e.target.value })}
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              if (newTicketData.installerInput.trim()) {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  installers: [...newTicketData.installers, newTicketData.installerInput.trim()],
+                                  installerInput: ''
+                                });
+                              }
+                            }
+                          }}
+                          className="flex-1 px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                          placeholder="Enter installer name and press Enter..."
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (newTicketData.installerInput.trim()) {
+                              setNewTicketData({
+                                ...newTicketData,
+                                installers: [...newTicketData.installers, newTicketData.installerInput.trim()],
+                                installerInput: ''
+                              });
+                            }
+                          }}
+                          className="px-4 py-3 rounded-xl bg-cyan-500/20 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/30"
+                        >
+                          Add
+                        </button>
+                      </div>
+                      {newTicketData.installers.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {newTicketData.installers.map((installer, idx) => (
+                            <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                              {installer}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewTicketData({
+                                    ...newTicketData,
+                                    installers: newTicketData.installers.filter((_, i) => i !== idx)
+                                  });
+                                }}
+                                className="text-rose-400 hover:text-rose-300"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Dependencies</label>
+                      <div className="flex gap-2 mb-2">
+                        <input
+                          type="text"
+                          value={newTicketData.dependencyInput}
+                          onChange={(e) => setNewTicketData({ ...newTicketData, dependencyInput: e.target.value })}
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              if (newTicketData.dependencyInput.trim()) {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  dependencies: [...newTicketData.dependencies, newTicketData.dependencyInput.trim()],
+                                  dependencyInput: ''
+                                });
+                              }
+                            }
+                          }}
+                          className="flex-1 px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                          placeholder="Enter dependency and press Enter..."
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (newTicketData.dependencyInput.trim()) {
+                              setNewTicketData({
+                                ...newTicketData,
+                                dependencies: [...newTicketData.dependencies, newTicketData.dependencyInput.trim()],
+                                dependencyInput: ''
+                              });
+                            }
+                          }}
+                          className="px-4 py-3 rounded-xl bg-cyan-500/20 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/30"
+                        >
+                          Add
+                        </button>
+                      </div>
+                      {newTicketData.dependencies.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {newTicketData.dependencies.map((dep, idx) => (
+                            <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                              {dep}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewTicketData({
+                                    ...newTicketData,
+                                    dependencies: newTicketData.dependencies.filter((_, i) => i !== idx)
+                                  });
+                                }}
+                                className="text-rose-400 hover:text-rose-300"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Target Date</label>
+                      <input
+                        type="date"
+                        value={newTicketData.targetDate}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, targetDate: e.target.value })}
+                        className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                      />
+                    </div>
+                  </>
+                )}
 
                 <div>
                   <label className="block text-sm font-medium text-slate-300 mb-2">ClickUp Ticket <span className="text-slate-500">(optional)</span></label>
@@ -625,9 +1032,139 @@ export default function AdminPage() {
                   <textarea value={newTicketData.issue} onChange={(e) => setNewTicketData({ ...newTicketData, issue: e.target.value })} rows={4} required className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white resize-none" placeholder="Describe the issue..." />
                 </div>
 
+                {/* File uploads for regular tickets (max 5 images) */}
+                {newTicketData.ticketType !== 'New Site' && (
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">
+                      Attachments <span className="text-slate-500">(up to 5 images)</span>
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(e) => {
+                        const files = Array.from(e.target.files || []);
+                        if (files.length + newTicketData.attachments.length > 5) {
+                          alert('Maximum 5 images allowed');
+                          return;
+                        }
+                        setNewTicketData({ ...newTicketData, attachments: [...newTicketData.attachments, ...files] });
+                      }}
+                      className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                    />
+                    {newTicketData.attachments.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {newTicketData.attachments.map((file, idx) => (
+                          <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                            {file.name}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  attachments: newTicketData.attachments.filter((_, i) => i !== idx)
+                                });
+                              }}
+                              className="text-rose-400 hover:text-rose-300"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Site files for New Site tickets */}
+                {newTicketData.ticketType === 'New Site' && (
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">
+                      Site Information, BOM, Site Images, Hardware Delivery Notes, etc.
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*,.pdf,.doc,.docx"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const label = prompt('Enter label for this file (e.g., "Site Information", "BOM", "Site Images", "Hardware Delivery Notes"):') || 'Site File';
+                          setNewTicketData({
+                            ...newTicketData,
+                            siteFiles: [...newTicketData.siteFiles, { file, label }]
+                          });
+                        }
+                      }}
+                      className="w-full px-4 py-3 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                    />
+                    {newTicketData.siteFiles.length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {newTicketData.siteFiles.map((item, idx) => (
+                          <div key={idx} className="px-3 py-2 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center justify-between">
+                            <div>
+                              <span className="font-medium">{item.label}:</span> {item.file.name}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  siteFiles: newTicketData.siteFiles.filter((_, i) => i !== idx)
+                                });
+                              }}
+                              className="text-rose-400 hover:text-rose-300 ml-2"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex gap-3">
-                  <button type="submit" disabled={!selectedUserId || !newTicketData.issue.trim() || !newTicketData.client.trim() || !newTicketData.ticketType || !newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim()} className="flex-1 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-medium disabled:opacity-50">Create Ticket</button>
-                  <button type="button" onClick={() => setShowCreateForm(false)} className="px-5 py-3 rounded-xl bg-slate-700 text-slate-300">Cancel</button>
+                  <button 
+                    type="submit" 
+                    disabled={
+                      uploadingFiles ||
+                      !selectedUserId || 
+                      !newTicketData.issue.trim() || 
+                      !newTicketData.client.trim() || 
+                      !newTicketData.ticketType || 
+                      (newTicketData.ticketType !== 'New Site' && (!newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim())) ||
+                      (newTicketData.ticketType === 'New Site' && !newTicketData.siteName.trim())
+                    } 
+                    className="flex-1 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-medium disabled:opacity-50"
+                  >
+                    {uploadingFiles ? 'Creating...' : 'Create Ticket'}
+                  </button>
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      setShowCreateForm(false);
+                      setNewTicketData({ 
+                        issue: '', 
+                        location: 'remote', 
+                        client: '', 
+                        clickupTicket: '', 
+                        ticketType: '', 
+                        estateOrBuilding: '', 
+                        cmlLocation: '',
+                        siteName: '',
+                        installers: [],
+                        installerInput: '',
+                        dependencies: [],
+                        dependencyInput: '',
+                        targetDate: '',
+                        attachments: [],
+                        siteFiles: []
+                      });
+                    }} 
+                    className="px-5 py-3 rounded-xl bg-slate-700 text-slate-300"
+                  >
+                    Cancel
+                  </button>
                 </div>
               </form>
             </div>
@@ -757,6 +1294,88 @@ export default function AdminPage() {
                       className="hidden" 
                     />
                   </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* User Management Modal */}
+      {showUserManagement && (
+        <div className="fixed inset-0 z-50 overflow-hidden">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowUserManagement(false)} />
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="w-full max-w-2xl bg-slate-900 rounded-2xl border border-slate-700/50 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="p-6 border-b border-slate-700/50 sticky top-0 bg-slate-900">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-bold text-white">Manage Users</h2>
+                  <button onClick={() => setShowUserManagement(false)} className="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6">
+                {/* Password Management Info */}
+                <div className="mb-6 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30">
+                  <h3 className="text-sm font-semibold text-amber-400 mb-2">🔐 Password Management</h3>
+                  <p className="text-xs text-slate-300 mb-3">
+                    To reset a team member&apos;s password, go to your Supabase Dashboard:
+                  </p>
+                  <a 
+                    href="https://supabase.com/dashboard/project/csbliwkldlglbniqmdin/auth/users" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 text-amber-400 text-sm hover:bg-amber-500/30 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                    Open Supabase Auth Dashboard
+                  </a>
+                </div>
+
+                {/* Team Members List */}
+                <h3 className="text-sm font-semibold text-slate-300 mb-4">Team Members ({profiles.length})</h3>
+                <div className="space-y-3">
+                  {profiles.map(p => (
+                    <div key={p.id} className="flex items-center justify-between p-4 rounded-xl bg-slate-800/50 border border-slate-700/50">
+                      <div className="flex items-center gap-3">
+                        {p.avatar_url ? (
+                          <Image src={p.avatar_url} alt={p.full_name} width={40} height={40} className="w-10 h-10 rounded-lg object-cover" />
+                        ) : (
+                          <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${getAvatarGradient(p.full_name)} flex items-center justify-center text-white font-bold text-sm`}>
+                            {p.avatar}
+                          </div>
+                        )}
+                        <div>
+                          <p className="text-sm font-medium text-white">{p.full_name}</p>
+                          <p className="text-xs text-slate-500">{p.email}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-1 rounded text-xs bg-slate-700 text-slate-300">{p.role}</span>
+                        {p.is_admin && (
+                          <span className="px-2 py-1 rounded text-xs bg-rose-500/20 text-rose-400">Admin</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Add New User Info */}
+                <div className="mt-6 p-4 rounded-xl bg-slate-800/50 border border-slate-700/50">
+                  <h3 className="text-sm font-semibold text-slate-300 mb-2">➕ Add New Team Member</h3>
+                  <p className="text-xs text-slate-400 mb-3">
+                    New team members can sign up at:
+                  </p>
+                  <code className="block p-2 rounded bg-slate-900 text-cyan-400 text-xs break-all">
+                    https://kpi-tracker-six.vercel.app/login
+                  </code>
+                  <p className="text-xs text-slate-500 mt-2">
+                    They click &quot;Sign up&quot; and create their account. Then you can update their role in Supabase if needed.
+                  </p>
                 </div>
               </div>
             </div>

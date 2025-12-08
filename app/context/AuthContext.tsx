@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import { supabase, Profile, getCurrentProfile } from '../lib/supabase';
 import { User, Session } from '@supabase/supabase-js';
 
@@ -24,90 +24,89 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const refreshProfile = async () => {
-    const prof = await getCurrentProfile();
-    setProfile(prof);
-  };
+  const fetchProfile = useCallback(async (userId: string) => {
+    try {
+      const prof = await getCurrentProfile(userId);
+      setProfile(prof);
+      return prof;
+    } catch (err) {
+      console.error('Error fetching profile:', err);
+      return null;
+    }
+  }, []);
+
+  const refreshProfile = useCallback(async () => {
+    if (user?.id) {
+      await fetchProfile(user.id);
+    }
+  }, [user?.id, fetchProfile]);
 
   useEffect(() => {
-    let mounted = true;
+    let isMounted = true;
 
-    // Get initial session
-    const initAuth = async () => {
+    const initialize = async () => {
       try {
-        console.log('AuthContext: Getting session...');
-        const { data: { session }, error } = await supabase.auth.getSession();
+        // Get the current session
+        const { data: { session: currentSession } } = await supabase.auth.getSession();
         
-        if (error) {
-          console.error('AuthContext: Session error:', error);
+        if (!isMounted) return;
+
+        if (currentSession?.user) {
+          setSession(currentSession);
+          setUser(currentSession.user);
+          await fetchProfile(currentSession.user.id);
         }
-        
-        if (!mounted) return;
-        
-        console.log('AuthContext: Session result:', { hasSession: !!session, hasUser: !!session?.user });
-        
-        setSession(session);
-        setUser(session?.user ?? null);
-        
-        if (session?.user) {
-          console.log('AuthContext: Fetching profile...');
-          const prof = await getCurrentProfile(session.user.id);
-          console.log('AuthContext: Profile result:', { hasProfile: !!prof, isAdmin: prof?.is_admin });
-          if (mounted) {
-            setProfile(prof);
-          }
-        }
-        
-        if (mounted) {
-          setLoading(false);
-        }
-      } catch (err) {
-        console.error('AuthContext: Init error:', err);
-        if (mounted) {
+      } catch (error) {
+        console.error('Auth initialization error:', error);
+      } finally {
+        if (isMounted) {
           setLoading(false);
         }
       }
     };
 
-    initAuth();
+    // Set up auth state listener FIRST
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, newSession) => {
+        if (!isMounted) return;
 
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log('AuthContext: Auth state changed:', event, 'hasSession:', !!session);
-      
-      if (!mounted) return;
-      
-      setSession(session);
-      setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        console.log('AuthContext: onAuthStateChange - fetching profile for user:', session.user.id);
-        try {
-          const prof = await getCurrentProfile(session.user.id);
-          console.log('AuthContext: onAuthStateChange - profile result:', prof);
-          if (mounted) {
-            setProfile(prof);
-            setLoading(false);
-          }
-        } catch (err) {
-          console.error('AuthContext: onAuthStateChange - profile error:', err);
-          if (mounted) {
-            setLoading(false);
-          }
+        console.log('Auth state change:', event);
+
+        setSession(newSession);
+        setUser(newSession?.user ?? null);
+
+        if (newSession?.user) {
+          // Use setTimeout to avoid race conditions with Supabase
+          setTimeout(() => {
+            if (isMounted) {
+              fetchProfile(newSession.user.id);
+            }
+          }, 100);
+        } else {
+          setProfile(null);
         }
-      } else {
-        setProfile(null);
-        if (mounted) {
-          setLoading(false);
-        }
+
+        setLoading(false);
       }
-    });
+    );
+
+    // Then initialize
+    initialize();
+
+    // Safety timeout
+    const timeout = setTimeout(() => {
+      if (isMounted && loading) {
+        console.log('Auth timeout - forcing load complete');
+        setLoading(false);
+      }
+    }, 3000);
 
     return () => {
-      mounted = false;
+      isMounted = false;
       subscription.unsubscribe();
+      clearTimeout(timeout);
     };
-  }, []);
+  }, [fetchProfile, loading]);
 
   const signIn = async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });

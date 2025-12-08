@@ -1,166 +1,41 @@
 'use client';
 
-import { useState } from 'react';
-import Link from 'next/link';
-import { teamMembers } from './data/teamData';
-import { TeamMemberCard } from './components/TeamMemberCard';
-import { TeamMemberDetail } from './components/TeamMemberDetail';
-import { DashboardStats } from './components/DashboardStats';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from './context/AuthContext';
 
 export default function Home() {
-  const [selectedMember, setSelectedMember] = useState<string | null>(null);
-  
-  const selectedMemberData = selectedMember 
-    ? teamMembers.find(m => m.id === selectedMember) 
-    : null;
+  const router = useRouter();
+  const { user, loading, isAdmin } = useAuth();
 
+  useEffect(() => {
+    if (!loading) {
+      if (!user) {
+        // Not logged in → go to login
+        router.push('/login');
+      } else if (isAdmin) {
+        // Admin → go to admin dashboard
+        router.push('/admin');
+      } else {
+        // Regular user → go to their tickets
+        router.push('/dashboard');
+      }
+    }
+  }, [user, loading, isAdmin, router]);
+
+  // Show loading while checking auth and redirecting
   return (
-    <div className="min-h-screen bg-slate-950 bg-grid-pattern bg-radial-gradient">
-      {/* Header */}
-      <header className="sticky top-0 z-40 glass border-b border-slate-700/50">
-        <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              {/* Logo */}
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-violet-600 flex items-center justify-center shadow-lg shadow-violet-500/20">
-                <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-white">KPI Tracker</h1>
-                <p className="text-xs text-slate-400">Digital Solutions Team</p>
-              </div>
-            </div>
-            
-            {/* Quick stats */}
-            <div className="hidden md:flex items-center gap-6">
-              <div className="text-right">
-                <p className="text-xs text-slate-500">Team Members</p>
-                <p className="text-lg font-bold text-white">{teamMembers.length}</p>
-              </div>
-              <div className="w-px h-8 bg-slate-700" />
-              <div className="text-right">
-                <p className="text-xs text-slate-500">Overall Status</p>
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <p className="text-sm font-medium text-emerald-400">On Track</p>
-                </div>
-              </div>
-              <div className="w-px h-8 bg-slate-700" />
-              <Link
-                href="/admin"
-                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-rose-500 to-orange-600 text-white text-sm font-medium shadow-lg hover:shadow-rose-500/25 transition-all"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Admin
-              </Link>
-            </div>
-          </div>
+    <div className="min-h-screen bg-slate-950 bg-grid-pattern bg-radial-gradient flex items-center justify-center">
+      <div className="text-center">
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-cyan-500 to-violet-600 flex items-center justify-center shadow-lg mb-6">
+          <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
         </div>
-      </header>
-
-      {/* Main content */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        {/* Page title */}
-        <div className="mb-8 animate-fade-in">
-          <h2 className="text-3xl font-bold text-white mb-2">
-            Team Performance Dashboard
-          </h2>
-          <p className="text-slate-400">
-            Monitor KPIs for digital access control support team members. Click on a team member to view detailed metrics.
-          </p>
+        <h1 className="text-2xl font-bold text-white mb-2">KPI Tracker</h1>
+        <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mt-4" />
+        <p className="text-slate-400 mt-4">Redirecting...</p>
         </div>
-
-        {/* Dashboard stats */}
-        <section className="mb-10">
-          <h3 className="text-lg font-semibold text-slate-300 mb-4 flex items-center gap-2">
-            <svg className="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-            </svg>
-            Team Overview
-          </h3>
-          <DashboardStats />
-        </section>
-
-        {/* Team members grid */}
-        <section>
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-lg font-semibold text-slate-300 flex items-center gap-2">
-              <svg className="w-5 h-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              Team Members
-            </h3>
-            <div className="flex items-center gap-3 text-xs">
-              <span className="flex items-center gap-1.5 text-slate-400">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                On Target
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-400">
-                <span className="w-2 h-2 rounded-full bg-amber-400" />
-                Needs Attention
-              </span>
-            </div>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {teamMembers.map((member, index) => (
-              <TeamMemberCard
-                key={member.id}
-                member={member}
-                onClick={() => setSelectedMember(member.id)}
-                delay={index * 100}
-              />
-            ))}
-          </div>
-        </section>
-
-        {/* KPI Legend */}
-        <section className="mt-10 p-6 rounded-2xl bg-slate-800/30 border border-slate-700/30 animate-fade-in" style={{ animationDelay: '600ms' }}>
-          <h3 className="text-sm font-semibold text-slate-300 mb-4">KPI Categories</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="flex items-start gap-3">
-              <div className="w-3 h-3 rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 mt-1" />
-              <div>
-                <p className="text-sm font-medium text-slate-200">Individual KPIs</p>
-                <p className="text-xs text-slate-500">Personal performance metrics tracked per team member</p>
-              </div>
-            </div>
-            <div className="flex items-start gap-3">
-              <div className="w-3 h-3 rounded-full bg-gradient-to-r from-violet-500 to-purple-600 mt-1" />
-              <div>
-                <p className="text-sm font-medium text-slate-200">Team KPIs</p>
-                <p className="text-xs text-slate-500">Collaborative metrics shared across the support team</p>
-              </div>
-            </div>
-            <div className="flex items-start gap-3">
-              <div className="w-3 h-3 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 mt-1" />
-              <div>
-                <p className="text-sm font-medium text-slate-200">Group Impact & Engagement</p>
-                <p className="text-xs text-slate-500">Workplace behavior assessed via Bamboo surveys</p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Footer note */}
-        <footer className="mt-10 text-center text-xs text-slate-600 animate-fade-in" style={{ animationDelay: '700ms' }}>
-          <p>KPI achievement is at the discretion of the Solutions Manager, Coenie Bernhardt, in conjunction with the Executive Management Team.</p>
-          <p className="mt-1">Tracking systems: Google Sheets Ticket Management System • ClickUp • Bamboo HR</p>
-        </footer>
-      </main>
-
-      {/* Team member detail panel */}
-      {selectedMemberData && (
-        <TeamMemberDetail
-          member={selectedMemberData}
-          onClose={() => setSelectedMember(null)}
-        />
-      )}
     </div>
   );
 }

@@ -38,8 +38,39 @@ CREATE TABLE tickets (
   response_time_minutes INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   closed_at TIMESTAMPTZ,
-  created_by UUID REFERENCES profiles(id)
+  created_by UUID REFERENCES profiles(id),
+  -- Additional fields
+  has_dependencies BOOLEAN DEFAULT FALSE,
+  dependency_name TEXT,
+  ticket_type TEXT CHECK (ticket_type IN ('Hardware', 'Software', 'New Site')),
+  estate_or_building TEXT,
+  cml_location TEXT,
+  updates JSONB DEFAULT '[]',
+  -- Time tracking fields
+  time_logs JSONB DEFAULT '[]',
+  total_time_minutes INTEGER DEFAULT 0
 );
+
+-- ============================================
+-- MIGRATION: Add missing columns to existing tables
+-- Run these if tables already exist
+-- ============================================
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS has_dependencies BOOLEAN DEFAULT FALSE;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS dependency_name TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ticket_type TEXT CHECK (ticket_type IN ('Hardware', 'Software', 'New Site'));
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS estate_or_building TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS cml_location TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS updates JSONB DEFAULT '[]';
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS time_logs JSONB DEFAULT '[]';
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS total_time_minutes INTEGER DEFAULT 0;
+-- New Site ticket fields
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS site_name TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS installers TEXT[] DEFAULT '{}';
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS site_files JSONB DEFAULT '[]';
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS dependencies TEXT[] DEFAULT '{}';
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS target_date DATE;
+-- Attachments for regular tickets (max 5 images)
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]';
 
 -- ============================================
 -- ROW LEVEL SECURITY (RLS) POLICIES

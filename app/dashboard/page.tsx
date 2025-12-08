@@ -1,23 +1,43 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
-import { getTicketsByUserId, createTicket, closeTicket, addTicketUpdate, Ticket } from '../lib/supabase';
+import { getTicketsByUserId, createTicket, closeTicket, addTicketUpdate, uploadProfilePicture, uploadTicketAttachment, updateTicket, Ticket } from '../lib/supabase';
 import Link from 'next/link';
 import Image from 'next/image';
+
+// Hook to force re-render every minute for time tracking
+function useTimeUpdate() {
+  const [, setTick] = useState(0);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTick(t => t + 1);
+    }, 60000); // Update every minute
+    
+    return () => clearInterval(interval);
+  }, []);
+}
 
 type TaskLocation = 'on-site' | 'remote';
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, profile, loading, isAdmin, signOut } = useAuth();
+  const { user, profile, loading, isAdmin, signOut, refreshProfile } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Force re-render every minute to update time tracker
+  useTimeUpdate();
   
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loadingTickets, setLoadingTickets] = useState(true);
   const [showNewTicketForm, setShowNewTicketForm] = useState(false);
   const [activeTab, setActiveTab] = useState<'open' | 'closed'>('open');
   const [closingTicketId, setClosingTicketId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadingPicture, setUploadingPicture] = useState(false);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
   
   const [newTicketData, setNewTicketData] = useState({
     issue: '',
@@ -26,9 +46,19 @@ export default function DashboardPage() {
     clickupTicket: '',
     hasDependencies: false,
     dependencyName: '',
-    ticketType: '' as 'Hardware' | 'Software' | '',
+    ticketType: '' as 'Hardware' | 'Software' | 'New Site' | '',
     estateOrBuilding: '',
-    cmlLocation: ''
+    cmlLocation: '',
+    // New Site fields
+    siteName: '',
+    installers: [] as string[],
+    installerInput: '',
+    dependencies: [] as string[],
+    dependencyInput: '',
+    targetDate: '',
+    // File uploads
+    attachments: [] as File[],
+    siteFiles: [] as { file: File; label: string }[]
   });
 
   const [closeTicketData, setCloseTicketData] = useState({
@@ -46,12 +76,12 @@ export default function DashboardPage() {
     }
   }, [user, loading, router]);
 
-  // Load tickets
+  // Load tickets - only when user ID changes
   useEffect(() => {
-    if (user) {
+    if (user?.id) {
       loadTickets();
     }
-  }, [user]);
+  }, [user?.id]);
 
   const loadTickets = async () => {
     if (!user) return;
@@ -63,54 +93,140 @@ export default function DashboardPage() {
 
   const handleCreateTicket = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('handleCreateTicket called with:', newTicketData);
     
-    if (!user) { console.log('No user'); return; }
-    if (!newTicketData.issue.trim()) { console.log('No issue'); return; }
-    if (!newTicketData.client.trim()) { console.log('No client'); return; }
-    if (!newTicketData.ticketType) { console.log('No ticketType'); return; }
-    if (!newTicketData.estateOrBuilding.trim()) { console.log('No estateOrBuilding'); return; }
-    if (!newTicketData.cmlLocation.trim()) { console.log('No cmlLocation'); return; }
-    if (newTicketData.hasDependencies && !newTicketData.dependencyName.trim()) { console.log('No dependencyName'); return; }
-
-    console.log('Validation passed, creating ticket...');
+    // Prevent double submission
+    if (isSubmitting || uploadingFiles) return;
     
-    const { data, error } = await createTicket({
-      user_id: user.id,
-      client: newTicketData.client.trim(),
-      clickup_ticket: newTicketData.clickupTicket.trim() || undefined,
-      location: newTicketData.location,
-      issue: newTicketData.issue.trim(),
-      created_by: user.id,
-      has_dependencies: newTicketData.hasDependencies,
-      dependency_name: newTicketData.hasDependencies ? newTicketData.dependencyName.trim() : undefined,
-      ticket_type: newTicketData.ticketType,
-      estate_or_building: newTicketData.estateOrBuilding.trim(),
-      cml_location: newTicketData.cmlLocation.trim()
-    });
-
-    console.log('createTicket result:', { data, error });
+    if (!user) return;
+    if (!newTicketData.issue.trim()) return;
+    if (!newTicketData.client.trim()) return;
+    if (!newTicketData.ticketType) return;
     
-    if (error) {
-      console.error('Error creating ticket:', error);
-      alert('Error creating ticket: ' + (error as Error).message);
-      return;
+    // Validation for regular tickets
+    if (newTicketData.ticketType !== 'New Site') {
+      if (!newTicketData.estateOrBuilding.trim()) return;
+      if (!newTicketData.cmlLocation.trim()) return;
+      if (newTicketData.hasDependencies && !newTicketData.dependencyName.trim()) return;
     }
     
-    if (data) {
-      setTickets([data, ...tickets]);
-      setNewTicketData({ issue: '', location: 'remote', client: '', clickupTicket: '', hasDependencies: false, dependencyName: '', ticketType: '', estateOrBuilding: '', cmlLocation: '' });
+    // Validation for New Site tickets
+    if (newTicketData.ticketType === 'New Site') {
+      if (!newTicketData.siteName.trim()) return;
+    }
+
+    setIsSubmitting(true);
+    setUploadingFiles(true);
+    
+    try {
+      // Create ticket first (without files)
+      const ticketPayload: any = {
+        user_id: user.id,
+        client: newTicketData.client.trim(),
+        clickup_ticket: newTicketData.clickupTicket.trim() || undefined,
+        location: newTicketData.location,
+        issue: newTicketData.issue.trim(),
+        created_by: user.id,
+        ticket_type: newTicketData.ticketType,
+      };
+
+      // Add regular ticket fields
+      if (newTicketData.ticketType !== 'New Site') {
+        ticketPayload.estate_or_building = newTicketData.estateOrBuilding.trim();
+        ticketPayload.cml_location = newTicketData.cmlLocation.trim();
+        ticketPayload.has_dependencies = newTicketData.hasDependencies;
+        ticketPayload.dependency_name = newTicketData.hasDependencies ? newTicketData.dependencyName.trim() : undefined;
+      }
+
+      // Add New Site fields
+      if (newTicketData.ticketType === 'New Site') {
+        ticketPayload.site_name = newTicketData.siteName.trim();
+        ticketPayload.installers = newTicketData.installers;
+        ticketPayload.dependencies = newTicketData.dependencies;
+        ticketPayload.target_date = newTicketData.targetDate || undefined;
+      }
+
+      const { data, error } = await createTicket(ticketPayload);
+      
+      if (error || !data) {
+        alert('Error creating ticket: ' + (error as Error).message);
+        return;
+      }
+      
+      // Upload attachments for regular tickets (max 5)
+      if (newTicketData.ticketType !== 'New Site' && newTicketData.attachments.length > 0) {
+        setUploadingFiles(true);
+        const uploadPromises = newTicketData.attachments.slice(0, 5).map(async (file) => {
+          const { url, error } = await uploadTicketAttachment(data.id, file, 'attachment');
+          if (error || !url) {
+            console.error('Error uploading attachment:', error);
+            return null;
+          }
+          return { url, name: file.name, type: file.type };
+        });
+        const results = await Promise.all(uploadPromises);
+        const attachments = results.filter((r): r is { url: string; name: string; type: string } => r !== null);
+        
+        // Update ticket with attachments
+        if (attachments.length > 0) {
+          await updateTicket(data.id, { attachments });
+        }
+      }
+
+      // Upload site files for New Site tickets
+      if (newTicketData.ticketType === 'New Site' && newTicketData.siteFiles.length > 0) {
+        setUploadingFiles(true);
+        const siteFilePromises = newTicketData.siteFiles.map(async ({ file, label }) => {
+          const { url, error } = await uploadTicketAttachment(data.id, file, 'site_file', label);
+          if (error || !url) {
+            console.error('Error uploading site file:', error);
+            return null;
+          }
+          return { url, name: file.name, type: file.type, label };
+        });
+        const siteFileResults = await Promise.all(siteFilePromises);
+        const siteFiles = siteFileResults.filter((r): r is { url: string; name: string; type: string; label?: string } => r !== null);
+        
+        // Update ticket with site files
+        if (siteFiles.length > 0) {
+          await updateTicket(data.id, { site_files: siteFiles });
+        }
+      }
+      
+      // Reload tickets from database
+      await loadTickets();
+      setNewTicketData({ 
+        issue: '', 
+        location: 'remote', 
+        client: '', 
+        clickupTicket: '', 
+        hasDependencies: false, 
+        dependencyName: '', 
+        ticketType: '', 
+        estateOrBuilding: '', 
+        cmlLocation: '',
+        siteName: '',
+        installers: [],
+        installerInput: '',
+        dependencies: [],
+        dependencyInput: '',
+        targetDate: '',
+        attachments: [],
+        siteFiles: []
+      });
       setShowNewTicketForm(false);
+    } finally {
+      setIsSubmitting(false);
+      setUploadingFiles(false);
     }
   };
 
   const handleAddUpdate = async (ticketId: string) => {
     if (!newUpdateText.trim()) return;
 
-    const { data, error } = await addTicketUpdate(ticketId, newUpdateText.trim());
+    const { data, error } = await addTicketUpdate(ticketId, newUpdateText.trim(), profile?.full_name);
 
     if (!error && data) {
-      setTickets(tickets.map(t => t.id === ticketId ? data : t));
+      await loadTickets();
       setNewUpdateText('');
       setUpdatingTicketId(null);
     } else if (error) {
@@ -121,20 +237,13 @@ export default function DashboardPage() {
   const handleCloseTicket = async (ticketId: string) => {
     if (!closeTicketData.resolution.trim()) return;
 
-    // Auto-calculate response time from ticket creation
-    const ticket = tickets.find(t => t.id === ticketId);
-    const responseTimeMinutes = ticket 
-      ? Math.round((new Date().getTime() - new Date(ticket.created_at).getTime()) / (1000 * 60))
-      : undefined;
-
     const { data, error } = await closeTicket(
       ticketId,
-      closeTicketData.resolution.trim(),
-      responseTimeMinutes
+      closeTicketData.resolution.trim()
     );
 
     if (!error && data) {
-      setTickets(tickets.map(t => t.id === ticketId ? data : t));
+      await loadTickets();
       setClosingTicketId(null);
       setCloseTicketData({ resolution: '' });
     }
@@ -143,6 +252,48 @@ export default function DashboardPage() {
   const handleSignOut = async () => {
     await signOut();
     router.push('/login');
+  };
+
+  const handleProfilePictureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file');
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Image size must be less than 5MB');
+      return;
+    }
+
+    setUploadingPicture(true);
+    try {
+      const { publicUrl, error } = await uploadProfilePicture(user.id, file);
+      
+      if (error) {
+        alert('Error uploading profile picture: ' + (error as Error).message);
+        return;
+      }
+
+      if (publicUrl) {
+        // Refresh profile to get updated avatar_url
+        await refreshProfile();
+        alert('Profile picture updated successfully!');
+      }
+    } catch (error) {
+      console.error('Error uploading profile picture:', error);
+      alert('Error uploading profile picture. Please try again.');
+    } finally {
+      setUploadingPicture(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
   };
 
   // Calculate KPIs
@@ -200,19 +351,43 @@ export default function DashboardPage() {
       <header className="sticky top-0 z-40 glass border-b border-slate-700/50">
         <div className="max-w-4xl mx-auto px-6 py-4">
           <div className="flex items-center gap-4">
-            {profile.avatar_url ? (
-              <Image
-                src={profile.avatar_url}
-                alt={profile.full_name}
-                width={48}
-                height={48}
-                className="w-12 h-12 rounded-xl object-cover shadow-lg"
+            <div className="relative group">
+              {profile.avatar_url ? (
+                <Image
+                  src={profile.avatar_url}
+                  alt={profile.full_name}
+                  width={48}
+                  height={48}
+                  className="w-12 h-12 rounded-xl object-cover shadow-lg"
+                />
+              ) : (
+                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getAvatarGradient()} flex items-center justify-center text-white font-bold shadow-lg`}>
+                  {profile.avatar}
+                </div>
+              )}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingPicture}
+                className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-cyan-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Upload or edit profile picture"
+              >
+                {uploadingPicture ? (
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                )}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleProfilePictureUpload}
+                className="hidden"
               />
-            ) : (
-              <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getAvatarGradient()} flex items-center justify-center text-white font-bold shadow-lg`}>
-                {profile.avatar}
-              </div>
-            )}
+            </div>
             <div className="flex-1">
               <h1 className="text-xl font-bold text-white">{profile.full_name}</h1>
               <p className="text-sm text-slate-400">{profile.role}</p>
@@ -332,40 +507,195 @@ export default function DashboardPage() {
                 <label className="block text-sm font-medium text-slate-300 mb-2">Type <span className="text-rose-400">*</span></label>
                 <select
                   value={newTicketData.ticketType}
-                  onChange={(e) => setNewTicketData({ ...newTicketData, ticketType: e.target.value as 'Hardware' | 'Software' | '' })}
+                  onChange={(e) => setNewTicketData({ ...newTicketData, ticketType: e.target.value as 'Hardware' | 'Software' | 'New Site' | '' })}
                   required
                   className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none appearance-none cursor-pointer"
                 >
                   <option value="">Select type...</option>
                   <option value="Hardware">Hardware</option>
                   <option value="Software">Software</option>
+                  <option value="New Site">New Site</option>
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">Estate or Building <span className="text-rose-400">*</span></label>
-                <input
-                  type="text"
-                  value={newTicketData.estateOrBuilding}
-                  onChange={(e) => setNewTicketData({ ...newTicketData, estateOrBuilding: e.target.value })}
-                  required
-                  className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
-                  placeholder="Enter estate or building name..."
-                />
-              </div>
+              {/* Regular ticket fields (Hardware/Software) */}
+              {newTicketData.ticketType !== 'New Site' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Estate or Building <span className="text-rose-400">*</span></label>
+                    <input
+                      type="text"
+                      value={newTicketData.estateOrBuilding}
+                      onChange={(e) => setNewTicketData({ ...newTicketData, estateOrBuilding: e.target.value })}
+                      required={newTicketData.ticketType !== 'New Site'}
+                      className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                      placeholder="Enter estate or building name..."
+                    />
+                  </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Location <span className="text-rose-400">*</span></label>
-                <p className="text-xs text-slate-500 mb-2">as per CML</p>
-                <input
-                  type="text"
-                  value={newTicketData.cmlLocation}
-                  onChange={(e) => setNewTicketData({ ...newTicketData, cmlLocation: e.target.value })}
-                  required
-                  className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
-                  placeholder="Enter location..."
-                />
-              </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-1">Location <span className="text-rose-400">*</span></label>
+                    <p className="text-xs text-slate-500 mb-2">as per CML</p>
+                    <input
+                      type="text"
+                      value={newTicketData.cmlLocation}
+                      onChange={(e) => setNewTicketData({ ...newTicketData, cmlLocation: e.target.value })}
+                      required={newTicketData.ticketType !== 'New Site'}
+                      className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                      placeholder="Enter location..."
+                    />
+                  </div>
+                </>
+              )}
+
+              {/* New Site specific fields */}
+              {newTicketData.ticketType === 'New Site' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Site Name <span className="text-rose-400">*</span></label>
+                    <input
+                      type="text"
+                      value={newTicketData.siteName}
+                      onChange={(e) => setNewTicketData({ ...newTicketData, siteName: e.target.value })}
+                      required
+                      className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                      placeholder="Enter site name..."
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Installers</label>
+                    <div className="flex gap-2 mb-2">
+                      <input
+                        type="text"
+                        value={newTicketData.installerInput}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, installerInput: e.target.value })}
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (newTicketData.installerInput.trim()) {
+                              setNewTicketData({
+                                ...newTicketData,
+                                installers: [...newTicketData.installers, newTicketData.installerInput.trim()],
+                                installerInput: ''
+                              });
+                            }
+                          }
+                        }}
+                        className="flex-1 px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                        placeholder="Enter installer name and press Enter..."
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (newTicketData.installerInput.trim()) {
+                            setNewTicketData({
+                              ...newTicketData,
+                              installers: [...newTicketData.installers, newTicketData.installerInput.trim()],
+                              installerInput: ''
+                            });
+                          }
+                        }}
+                        className="px-4 py-3 rounded-xl bg-cyan-500/20 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/30"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {newTicketData.installers.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {newTicketData.installers.map((installer, idx) => (
+                          <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                            {installer}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  installers: newTicketData.installers.filter((_, i) => i !== idx)
+                                });
+                              }}
+                              className="text-rose-400 hover:text-rose-300"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Dependencies</label>
+                    <div className="flex gap-2 mb-2">
+                      <input
+                        type="text"
+                        value={newTicketData.dependencyInput}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, dependencyInput: e.target.value })}
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (newTicketData.dependencyInput.trim()) {
+                              setNewTicketData({
+                                ...newTicketData,
+                                dependencies: [...newTicketData.dependencies, newTicketData.dependencyInput.trim()],
+                                dependencyInput: ''
+                              });
+                            }
+                          }
+                        }}
+                        className="flex-1 px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                        placeholder="Enter dependency and press Enter..."
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (newTicketData.dependencyInput.trim()) {
+                            setNewTicketData({
+                              ...newTicketData,
+                              dependencies: [...newTicketData.dependencies, newTicketData.dependencyInput.trim()],
+                              dependencyInput: ''
+                            });
+                          }
+                        }}
+                        className="px-4 py-3 rounded-xl bg-cyan-500/20 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/30"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {newTicketData.dependencies.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {newTicketData.dependencies.map((dep, idx) => (
+                          <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                            {dep}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNewTicketData({
+                                  ...newTicketData,
+                                  dependencies: newTicketData.dependencies.filter((_, i) => i !== idx)
+                                });
+                              }}
+                              className="text-rose-400 hover:text-rose-300"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">Target Date</label>
+                    <input
+                      type="date"
+                      value={newTicketData.targetDate}
+                      onChange={(e) => setNewTicketData({ ...newTicketData, targetDate: e.target.value })}
+                      className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                    />
+                  </div>
+                </>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">ClickUp Ticket <span className="text-slate-500">(optional)</span></label>
@@ -418,56 +748,176 @@ export default function DashboardPage() {
                 />
               </div>
 
-              {/* Dependencies Checkbox */}
-              <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-700/50">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={newTicketData.hasDependencies}
-                    onChange={(e) => setNewTicketData({ 
-                      ...newTicketData, 
-                      hasDependencies: e.target.checked,
-                      dependencyName: e.target.checked ? newTicketData.dependencyName : ''
-                    })}
-                    className="w-5 h-5 rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  <div>
-                    <span className="text-sm font-medium text-slate-300">Dependencies</span>
-                    <p className="text-xs text-slate-500">Check if this ticket depends on another company or department</p>
-                  </div>
-                </label>
-
-                {newTicketData.hasDependencies && (
-                  <div className="mt-4 animate-fade-in">
-                    <label className="block text-sm font-medium text-slate-300 mb-2">
-                      Name of company or department <span className="text-rose-400">*</span>
-                    </label>
+              {/* Dependencies Checkbox - only for regular tickets */}
+              {newTicketData.ticketType !== 'New Site' && (
+                <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-700/50">
+                  <label className="flex items-center gap-3 cursor-pointer">
                     <input
-                      type="text"
-                      value={newTicketData.dependencyName}
-                      onChange={(e) => setNewTicketData({ ...newTicketData, dependencyName: e.target.value })}
-                      required={newTicketData.hasDependencies}
-                      className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
-                      placeholder="e.g., IT Department, ABC Company..."
+                      type="checkbox"
+                      checked={newTicketData.hasDependencies}
+                      onChange={(e) => setNewTicketData({ 
+                        ...newTicketData, 
+                        hasDependencies: e.target.checked,
+                        dependencyName: e.target.checked ? newTicketData.dependencyName : ''
+                      })}
+                      className="w-5 h-5 rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-500"
                     />
-                  </div>
-                )}
-              </div>
+                    <div>
+                      <span className="text-sm font-medium text-slate-300">Dependencies</span>
+                      <p className="text-xs text-slate-500">Check if this ticket depends on another company or department</p>
+                    </div>
+                  </label>
+
+                  {newTicketData.hasDependencies && (
+                    <div className="mt-4 animate-fade-in">
+                      <label className="block text-sm font-medium text-slate-300 mb-2">
+                        Name of company or department <span className="text-rose-400">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={newTicketData.dependencyName}
+                        onChange={(e) => setNewTicketData({ ...newTicketData, dependencyName: e.target.value })}
+                        required={newTicketData.hasDependencies}
+                        className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                        placeholder="e.g., IT Department, ABC Company..."
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* File uploads for regular tickets (max 5 images) */}
+              {newTicketData.ticketType !== 'New Site' && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Attachments <span className="text-slate-500">(up to 5 images)</span>
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files || []);
+                      if (files.length + newTicketData.attachments.length > 5) {
+                        alert('Maximum 5 images allowed');
+                        return;
+                      }
+                      setNewTicketData({ ...newTicketData, attachments: [...newTicketData.attachments, ...files] });
+                    }}
+                    className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                  />
+                  {newTicketData.attachments.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {newTicketData.attachments.map((file, idx) => (
+                        <span key={idx} className="px-3 py-1 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center gap-2">
+                          {file.name}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewTicketData({
+                                ...newTicketData,
+                                attachments: newTicketData.attachments.filter((_, i) => i !== idx)
+                              });
+                            }}
+                            className="text-rose-400 hover:text-rose-300"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Site files for New Site tickets */}
+              {newTicketData.ticketType === 'New Site' && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Site Information, BOM, Site Images, Hardware Delivery Notes, etc.
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*,.pdf,.doc,.docx"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const label = prompt('Enter label for this file (e.g., "Site Information", "BOM", "Site Images", "Hardware Delivery Notes"):') || 'Site File';
+                        setNewTicketData({
+                          ...newTicketData,
+                          siteFiles: [...newTicketData.siteFiles, { file, label }]
+                        });
+                      }
+                    }}
+                    className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white focus:border-cyan-500 outline-none"
+                  />
+                  {newTicketData.siteFiles.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      {newTicketData.siteFiles.map((item, idx) => (
+                        <div key={idx} className="px-3 py-2 rounded-lg bg-slate-700 text-slate-300 text-sm flex items-center justify-between">
+                          <div>
+                            <span className="font-medium">{item.label}:</span> {item.file.name}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewTicketData({
+                                ...newTicketData,
+                                siteFiles: newTicketData.siteFiles.filter((_, i) => i !== idx)
+                              });
+                            }}
+                            className="text-rose-400 hover:text-rose-300 ml-2"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="mt-6 flex gap-3">
               <button
                 type="submit"
-                disabled={!newTicketData.issue.trim() || !newTicketData.client.trim() || !newTicketData.ticketType || !newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim() || (newTicketData.hasDependencies && !newTicketData.dependencyName.trim())}
+                disabled={
+                  isSubmitting || 
+                  uploadingFiles ||
+                  !newTicketData.issue.trim() || 
+                  !newTicketData.client.trim() || 
+                  !newTicketData.ticketType || 
+                  (newTicketData.ticketType !== 'New Site' && (!newTicketData.estateOrBuilding.trim() || !newTicketData.cmlLocation.trim())) ||
+                  (newTicketData.ticketType !== 'New Site' && newTicketData.hasDependencies && !newTicketData.dependencyName.trim()) ||
+                  (newTicketData.ticketType === 'New Site' && !newTicketData.siteName.trim())
+                }
                 className="flex-1 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-medium disabled:opacity-50"
               >
-                Open Ticket
+                {isSubmitting || uploadingFiles ? 'Creating...' : 'Open Ticket'}
               </button>
               <button
                 type="button"
                 onClick={() => {
                   setShowNewTicketForm(false);
-                  setNewTicketData({ issue: '', location: 'remote', client: '', clickupTicket: '', hasDependencies: false, dependencyName: '', ticketType: '', estateOrBuilding: '', cmlLocation: '' });
+                  setNewTicketData({ 
+                    issue: '', 
+                    location: 'remote', 
+                    client: '', 
+                    clickupTicket: '', 
+                    hasDependencies: false, 
+                    dependencyName: '', 
+                    ticketType: '', 
+                    estateOrBuilding: '', 
+                    cmlLocation: '',
+                    siteName: '',
+                    installers: [],
+                    installerInput: '',
+                    dependencies: [],
+                    dependencyInput: '',
+                    targetDate: '',
+                    attachments: [],
+                    siteFiles: []
+                  });
                 }}
                 className="px-5 py-3 rounded-xl bg-slate-700 text-slate-300"
               >
@@ -553,10 +1003,103 @@ export default function DashboardPage() {
                       <p className="text-slate-200">{ticket.issue}</p>
                     </div>
 
-                    {ticket.has_dependencies && ticket.dependency_name && (
+                    {/* New Site ticket fields */}
+                    {ticket.ticket_type === 'New Site' && (
+                      <div className="mb-4 space-y-3">
+                        {ticket.site_name && (
+                          <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
+                            <p className="text-xs text-cyan-400 mb-1">Site Name</p>
+                            <p className="text-sm text-slate-300">{ticket.site_name}</p>
+                          </div>
+                        )}
+                        {ticket.installers && ticket.installers.length > 0 && (
+                          <div className="p-3 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                            <p className="text-xs text-violet-400 mb-2">Installers</p>
+                            <div className="flex flex-wrap gap-2">
+                              {ticket.installers.map((installer, idx) => (
+                                <span key={idx} className="px-2 py-1 rounded-lg bg-slate-700 text-slate-300 text-xs">
+                                  {installer}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {ticket.dependencies && ticket.dependencies.length > 0 && (
+                          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                            <p className="text-xs text-amber-400 mb-2">Dependencies</p>
+                            <div className="flex flex-wrap gap-2">
+                              {ticket.dependencies.map((dep, idx) => (
+                                <span key={idx} className="px-2 py-1 rounded-lg bg-slate-700 text-slate-300 text-xs">
+                                  {dep}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {ticket.target_date && (
+                          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                            <p className="text-xs text-emerald-400 mb-1">Target Date</p>
+                            <p className="text-sm text-slate-300">{new Date(ticket.target_date).toLocaleDateString('en-ZA')}</p>
+                          </div>
+                        )}
+                        {ticket.site_files && ticket.site_files.length > 0 && (
+                          <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20">
+                            <p className="text-xs text-blue-400 mb-2">Site Files</p>
+                            <div className="space-y-2">
+                              {ticket.site_files.map((file, idx) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                  <a
+                                    href={file.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-sm text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                    </svg>
+                                    {file.label || 'File'}: {file.name}
+                                  </a>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Regular ticket dependencies */}
+                    {ticket.has_dependencies && ticket.dependency_name && ticket.ticket_type !== 'New Site' && (
                       <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20">
                         <p className="text-xs text-rose-400 mb-1">Dependency</p>
                         <p className="text-sm text-slate-300">{ticket.dependency_name}</p>
+                      </div>
+                    )}
+
+                    {/* Attachments for regular tickets */}
+                    {ticket.attachments && ticket.attachments.length > 0 && ticket.ticket_type !== 'New Site' && (
+                      <div className="mb-4 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
+                        <p className="text-xs text-indigo-400 mb-2">Attachments</p>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                          {ticket.attachments.map((attachment, idx) => (
+                            <a
+                              key={idx}
+                              href={attachment.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="relative group"
+                            >
+                              <img
+                                src={attachment.url}
+                                alt={attachment.name}
+                                className="w-full h-24 object-cover rounded-lg border border-slate-700 hover:border-cyan-500 transition-colors"
+                              />
+                              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center">
+                                <span className="text-white text-xs">{attachment.name}</span>
+                              </div>
+                            </a>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -618,6 +1161,89 @@ export default function DashboardPage() {
                         Add Update
                       </button>
                     )}
+
+                    {/* Auto Time Tracker Section */}
+                    <div className="mb-4 p-3 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-violet-400 font-medium">⏱️ Auto Time Tracked</span>
+                        <span className="text-sm font-bold text-violet-300">
+                          {(() => {
+                            // Calculate total time including current elapsed time
+                            const loggedTime = ticket.total_time_minutes || 0;
+                            const lastUpdateTime = ticket.updates && ticket.updates.length > 0 
+                              ? new Date(ticket.updates[ticket.updates.length - 1].timestamp).getTime()
+                              : new Date(ticket.created_at).getTime();
+                            const currentElapsed = Math.round((new Date().getTime() - lastUpdateTime) / (1000 * 60));
+                            const totalMinutes = loggedTime + currentElapsed;
+                            return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+                          })()}
+                        </span>
+                      </div>
+                      
+                      {/* Time Logs */}
+                      {ticket.time_logs && ticket.time_logs.length > 0 ? (
+                        <div className="max-h-32 overflow-y-auto">
+                          {ticket.time_logs.map((log: { minutes: number; description: string; timestamp: string; logged_by?: string }, idx: number) => {
+                            // For the initial "Ticket opened" log with 0 minutes, show actual elapsed time
+                            const isInitialLog = log.description === 'Ticket opened' && log.minutes === 0 && idx === 0;
+                            const displayMinutes = isInitialLog && ticket.status === 'open'
+                              ? Math.round((new Date().getTime() - new Date(ticket.created_at).getTime()) / (1000 * 60))
+                              : log.minutes;
+                            
+                            return (
+                              <div key={idx} className="text-xs py-1.5 border-b border-violet-500/10 last:border-0">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1">
+                                    <span className="text-violet-300 font-medium">
+                                      {displayMinutes > 0 ? `${displayMinutes}m` : '0m'}
+                                      {isInitialLog && ticket.status === 'open' && (
+                                        <span className="text-violet-400/70 ml-1 text-xs">(live)</span>
+                                      )}
+                                    </span>
+                                    <span className="text-slate-400 mx-1">-</span>
+                                    <span className="text-slate-300">{log.description}</span>
+                                  </div>
+                                  <span className="text-slate-500 text-xs whitespace-nowrap">
+                                    {new Date(log.timestamp).toLocaleDateString('en-ZA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                                {log.logged_by && log.logged_by !== 'System' && (
+                                  <p className="text-xs text-slate-500 mt-0.5">by {log.logged_by}</p>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {/* Show additional current elapsed time if there are updates */}
+                          {ticket.status === 'open' && ticket.updates && ticket.updates.length > 0 && (() => {
+                            const lastUpdateTime = new Date(ticket.updates[ticket.updates.length - 1].timestamp).getTime();
+                            const currentElapsed = Math.round((new Date().getTime() - lastUpdateTime) / (1000 * 60));
+                            return currentElapsed > 0 ? (
+                              <div className="text-xs py-1.5 border-t border-violet-500/20 mt-1 pt-1.5">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1">
+                                    <span className="text-violet-300 font-medium">{currentElapsed}m</span>
+                                    <span className="text-slate-400 mx-1">-</span>
+                                    <span className="text-slate-300 italic">Currently tracking since last update</span>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null;
+                          })()}
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-xs text-slate-500 italic mb-2">Time tracking started when ticket was opened.</p>
+                          {ticket.status === 'open' && (() => {
+                            const elapsed = Math.round((new Date().getTime() - new Date(ticket.created_at).getTime()) / (1000 * 60));
+                            return (
+                              <p className="text-xs text-violet-300">
+                                Current elapsed time: {Math.floor(elapsed / 60)}h {elapsed % 60}m
+                              </p>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </div>
 
                     {closingTicketId === ticket.id ? (
                       <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-700/50">
@@ -745,6 +1371,39 @@ export default function DashboardPage() {
                         <p className="text-sm text-slate-300">{ticket.resolution}</p>
                       </div>
                     </div>
+
+                    {/* Auto Time Tracked for closed tickets */}
+                    {(ticket.total_time_minutes || (ticket.time_logs && ticket.time_logs.length > 0)) && (
+                      <div className="mt-4 p-3 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs text-violet-400 font-medium">⏱️ Auto Time Tracked</span>
+                          <span className="text-sm font-bold text-violet-300">
+                            {ticket.total_time_minutes ? `${Math.floor(ticket.total_time_minutes / 60)}h ${ticket.total_time_minutes % 60}m` : '0h 0m'}
+                          </span>
+                        </div>
+                        {ticket.time_logs && ticket.time_logs.length > 0 && (
+                          <div className="max-h-32 overflow-y-auto">
+                            {ticket.time_logs.map((log: { minutes: number; description: string; timestamp: string; logged_by?: string }, idx: number) => (
+                              <div key={idx} className="text-xs py-1.5 border-b border-violet-500/10 last:border-0">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1">
+                                    <span className="text-violet-300 font-medium">{log.minutes}m</span>
+                                    <span className="text-slate-400 mx-1">-</span>
+                                    <span className="text-slate-300">{log.description}</span>
+                                  </div>
+                                  <span className="text-slate-500 text-xs whitespace-nowrap">
+                                    {new Date(log.timestamp).toLocaleDateString('en-ZA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                                {log.logged_by && (
+                                  <p className="text-xs text-slate-500 mt-0.5">by {log.logged_by}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
